@@ -1,5 +1,7 @@
 package glib
 
-func test() {
-	println("test")
+import "fmt"
+
+func Test() {
+	fmt.Println("test")
 }
