@@ -2,7 +2,7 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
-package glib
+package troglodyte
 
 import (
 	"fmt"
@@ -214,7 +214,7 @@ func (im *InputManager) JustHandled(key string) bool {
 // they aren't printable characters. stuff like enter, esc, backspace and arrow keys are represented as "ENTER", "ESC", 
 // "BACKSPACE", "UP", "DOWN", "LEFT", "RIGHT" respectively in JustHandled. Something like space is represented as " "
 // and stuff like Ctrl + Shift + A would be "Ctrl+Shift+A" in JustHandled. Tab is represented as "\t" and function
-// keys like F1 and F4 are not supported at all in the current version of gLib, but may be added in the future.
+// keys like F1 and F4 are not supported at all in the current version of troglodyte, but may be added in the future.
 func (im *InputManager) GetCurrentTypableKey() string {
 	im.mu.RLock()
 	defer im.mu.RUnlock()
@@ -228,15 +228,15 @@ func (im *InputManager) GetCurrentTypableKey() string {
 
 // #endregion
 
-// A developer test function, you can call this in your main function to see if gLib has been initialized correctly.
+// A developer test function, you can call this in your main function to see if troglodyte has been initialized correctly.
 func Test() {
 	fmt.Println("test")
 }
 
-// Starts gLib and prepares the terminal to display graphics. Does not start Input. Use gLib.Input.Start()
+// Starts troglodyte and prepares the terminal to display graphics. Does not start Input. Use troglodyte.Input.Start()
 // to start the input manager if you need it. Init must be called before any graphics or Input stuff,
 // or bad things will happen, like spamming your terminal with control bytes or closing it entirely.
-// So make sure to call Init before other gLib functions! This also doesn't have to be for gLib functions.
+// So make sure to call Init before other troglodyte functions! This also doesn't have to be for troglodyte functions.
 // This works perfectly fine to put the terminal into a good state for custom drawing logic or other stuff.
 func Init() {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))

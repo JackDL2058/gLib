@@ -1,4 +1,4 @@
-module github.com/JackDL2058/gLib
+module github.com/JackDL2058/troglodyte
 
 go 1.25.5
 
