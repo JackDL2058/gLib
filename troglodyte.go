@@ -1,7 +1,6 @@
 // Copyright (c) 2026 Jack Durnin. All rights reserved.
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
-
 package troglodyte
 
 import (
@@ -16,7 +15,8 @@ import (
 )
 
 var (
-	keyHandled = make(map[string]bool) // flags to prevent continuous key adding
+	buildNumber = "0.0.8"
+	keyHandled  = make(map[string]bool) // flags to prevent continuous key adding
 )
 
 // #region Input
@@ -231,10 +231,21 @@ func (im *InputManager) GetCurrentTypableKey() string {
 
 // #endregion
 
+// Prints the version number. Same as version(). See version() for more info on how the version number works.
+func Test() {fmt.Println(buildNumber)}
 // A developer test function, you can call this in your main function to see if troglodyte has been initialized correctly.
-func Test() {
-	fmt.Println("test")
-}
+// Gives the build number for testing purposes. Here's how the version number works:
+// first number: Major version, version 1.0.0 would be the first major stable release. A complete rewrite or restructuring would be a new major version.
+// second number: minor version, works almost the same as previous version, just additional features like adding new functions.
+// third number: patch version, for small correction, but patches don't add new features.
+//
+// If you care, there's also a bugfix version, like 0.1.4-6, where -6 is the bugfix version. This number essentially doesn't matter because it's
+// actually just the amount of commits since the last patch version, meaning if multiple commits are spent on one patch, the bugfix goes up. It's
+// basically useless, but keep it in mind as it could be helpful to know if you're on a slightly different version than someone else.
+//
+// The version number only goes up for this file, so license changes or changes to other stuff won't change the version numbers but will change the commit
+// identifier or version number on github. It's also not updated automatically, so some bugfix numbers might not be correct.
+func Version() {fmt.Println(buildNumber)}
 
 // Starts troglodyte and prepares the terminal to display graphics. Does not start Input. Use troglodyte.Input.Start()
 // to start the input manager if you need it. Init must be called before any graphics or Input stuff,
