@@ -6,15 +6,16 @@ package troglodyte
 
 import (
 	"fmt"
-	"sync"
-	"golang.org/x/term"
-	"time"
 	"os"
-	"unicode"
 	"strings"
+	"sync"
+	"time"
+	"unicode"
+
+	"golang.org/x/term"
 )
 
-var( 
+var (
 	keyHandled = make(map[string]bool) // flags to prevent continuous key adding
 )
 
@@ -50,7 +51,9 @@ func (im *InputManager) Start(useMouse bool) {
 	}
 
 	// Enable mouse tracking: 1003 (all motion), 1006 (SGR extended mode)
-	if useMouse {fmt.Print("\033[?1003h\033[?1006h")}
+	if useMouse {
+		fmt.Print("\033[?1003h\033[?1006h")
+	}
 
 	go func() {
 		defer term.Restore(int(os.Stdin.Fd()), oldState)
@@ -68,7 +71,7 @@ func (im *InputManager) Start(useMouse bool) {
 			key := ""
 			inputStr := string(b[:n])
 
-			if useMouse{
+			if useMouse {
 				// Check for Mouse SGR Sequence: ESC[<button;x;y;M (Press) or m (Release)
 				if n > 5 && strings.HasPrefix(inputStr, "\x1b[<") {
 					var button, x, y int
@@ -142,7 +145,7 @@ func (im *InputManager) IsPressed(key string) bool {
 	return im.PressedKeys[key]
 }
 
-// gets the current mouse position in terminal coordinates. Note that this is not supported in all 
+// gets the current mouse position in terminal coordinates. Note that this is not supported in all
 // terminals, and may not work as expected in some environments.
 func (im *InputManager) GetCurrentMousePos() (int, int) {
 	im.mu.RLock()
@@ -210,8 +213,8 @@ func (im *InputManager) JustHandled(key string) bool {
 // it is not recommended to use this for something like text input, because it works every frame, unlike JustHandled.
 //
 // here's some more info about keys if you're interested:
-// control keys like Ctrl + A can be detected using JustHandled("Ctrl+A"), but they won't show up in GetCurrentTypableKey since 
-// they aren't printable characters. stuff like enter, esc, backspace and arrow keys are represented as "ENTER", "ESC", 
+// control keys like Ctrl + A can be detected using JustHandled("Ctrl+A"), but they won't show up in GetCurrentTypableKey since
+// they aren't printable characters. stuff like enter, esc, backspace and arrow keys are represented as "ENTER", "ESC",
 // "BACKSPACE", "UP", "DOWN", "LEFT", "RIGHT" respectively in JustHandled. Something like space is represented as " "
 // and stuff like Ctrl + Shift + A would be "Ctrl+Shift+A" in JustHandled. Tab is represented as "\t" and function
 // keys like F1 and F4 are not supported at all in the current version of troglodyte, but may be added in the future.
@@ -246,28 +249,29 @@ func Init() {
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 	defer RestoreTerminal()
 	InitializeTerminal()
-	
+
 }
 
 // Developer function. This is handled automatically when you call Init.
 // puts the terminal into an alternate screen buffer to preserve previous commands until restoreTerminal is called.
 // This also hides the cursor so you can print without having a blinking cursor flashing across the screen.
 func InitializeTerminal() { fmt.Print("\x1b[?1049h\x1b[?25l") }
+
 // Developer function. This is handled when you call Init.
-// Fixes everything in InitializeTerminal, and puts things back to normal, showing the cursor and 
+// Fixes everything in InitializeTerminal, and puts things back to normal, showing the cursor and
 // going back to the main screen buffer.
-func RestoreTerminal()    { fmt.Print("\x1b[?25h\x1b[?1049l") }
+func RestoreTerminal() { fmt.Print("\x1b[?25h\x1b[?1049l") }
 
 // Uses a variable to prevent errors, for temporary usage if you're trying to make many things work at once.
-// Another thing you could do is declare a variable and put this on the same line, like 
-// 
-// 'var h = "hello"; Use(h);' 
-// 
+// Another thing you could do is declare a variable and put this on the same line, like
+//
+// 'var h = "hello"; Use(h);'
+//
 // to prevent the 'h declared and not used' error. Remeber to remove this when you're done, since it doesn't actually do anything.
-func Use(h any) {d := h;h = d;}
+func Use(h any) { d := h; h = d }
 
 // Does nothing.
-func Pass(){}
+func Pass() {}
 
 // Clears the terminal screen.
 func ClearScreen() {
