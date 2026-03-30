@@ -1,1 +1,7 @@
 module github.com/JackDL2058/gLib
+
+go 1.25.5
+
+require golang.org/x/term v0.41.0
+
+require golang.org/x/sys v0.42.0 // indirect
