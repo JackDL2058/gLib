@@ -5,7 +5,9 @@ package troglodyte
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +17,215 @@ import (
 )
 
 var (
-	buildNumber = "0.0.8"
-	keyHandled  = make(map[string]bool) // flags to prevent continuous key adding
+	buildNumber = "0.0.9" // The current build number, in the format major.minor.patch. See Version() for more info on how the version number works.
+
+	keyHandled      = make(map[string]bool) // flags to prevent continuous key adding
+	buffer          = strings.Builder{}     // the buffer to store graphics, which is all printed at once for speed.
+	nextAvailableID = 0                     // used for creating objects.
 )
+
+// #region graphics, objects
+
+// Strings that represent colours in the terminal using ANSI escape codes.
+// To use them, add the colour before the text you want to be coloured, like so:
+//
+// fmt.Println(troglodyte.Red + "This text will be red!" + troglodyte.Default)
+//
+// These are also the colours used in the graphics drawer. You could set the colour of a
+// graphics drawer to Green, and draw text at certain coordinates with that colour, and
+// the default code at the end wouldn't be needed, as the grapics drawer would handle that
+// automatially.
+//
+// If you don't want to deal with the graphics drawer stuff, you could use a text drawer or
+// printAt, to print text at a certain location. You could also use MoveCursor to move to
+// a certain position and simply use fmt.Print to print your coloured text.
+const (
+	Black   = "\033[30m"
+	Red     = "\033[31m"
+	Green   = "\033[32m"
+	Yellow  = "\033[33m"
+	Blue    = "\033[34m"
+	Magenta = "\033[35m"
+	Cyan    = "\033[36m"
+	White   = "\033[37m"
+	Default = "\033[39m"
+
+	BgBlack   = "\033[40m"
+	BgRed     = "\033[41m"
+	BgGreen   = "\033[42m"
+	BgYellow  = "\033[43m"
+	BgBlue    = "\033[44m"
+	BgMagenta = "\033[45m"
+	BgCyan    = "\033[46m"
+	BgWhite   = "\033[47m"
+	BgDefault = "\033[49m"
+
+	BgGray          = "\033[100m"
+	BgBrightRed     = "\033[101m"
+	BgBrightGreen   = "\033[102m"
+	BgBrightYellow  = "\033[103m"
+	BgBrightBlue    = "\033[104m"
+	BgBrightMagenta = "\033[105m"
+	BgBrightCyan    = "\033[106m"
+	BgBrightWhite   = "\033[107m"
+
+	// cursor control ANSI escape codes:
+
+	// Moves cursor to row 1, column 1.
+	CursorHome = "\033[H"
+	// Clears from cursor to the end of the screen
+	ClearEnd = "\033[J"
+	// Optional: Makes the cursor (the text input symbol in the terminal, not your mouse) invisible.
+	HideCursor = "\033[?25l"
+	// Optional: Brings cursor back into view. See HideCursor.
+	ShowCursor = "\033[?25h"
+)
+
+// A single pixel, for use in sprites.
+type Pixel struct {
+	symbol   string
+	colour   string
+	bgColour string
+}
+
+// A list of pixels. A single row of a sprite. Contains columns for that row.
+type SpriteRow struct {
+	pixels []Pixel // A list of pixels in that row.
+}
+
+// A large data structure to store pixel data for an object's sprite.
+type Sprite struct {
+	size int // the vertical size of the sprite, amount of rows.
+	rows []SpriteRow
+}
+
+// A basic object with a graphics drawrer and sprite component. It has an x and y position that can be used in the draw
+// functions of the graphics drawer, like drawing the sprite component at whatever position.
+// To create one with certain components, use these functions:
+//
+// objectWithoutSpriteOrGraphics := NewBlankObject(x, y)
+// objectWithSpriteAndGraphics := NewObject(x, y, graphicsDrawer, sprite) // sprite is optional
+type Object struct {
+	graphicsDrawer *GraphicsDrawer // The graphics drawer. Can be left empty, but then you won't have any graphics functions or sprite drawing.
+	sprite         *Sprite         // The attached sprite. Can be left as empty. To use sprites, you'll need a graphics drawer.
+	x              int
+	y              int
+	children       []int // children ids, other objects, set using object.AddChild(id). An object can't be its own child/parent. Children follow their parent's movement.
+	id             int   // self id, will be set automatically when creating a new object.
+}
+
+// Adds a child to an object using its ID. A child can only be an object, not a component. Children follow their parent's movement.
+// If you use a number that isn't attached to an object, that WILL crash the game by index out of range. To get the Id of an object to
+// add it as a child to another object, use newChild.id as the id. Make sure newChild is an object, not a component, or everything breaks.
+func (o *Object) AddChild(id int) {
+	if id == o.id {
+		return // prevent self parent/child relationship
+	}
+
+	if slices.Contains(o.children, id) {
+		return // already a child, do nothing
+	}
+
+	o.children = append(o.children, id) // add the child
+}
+
+// Creates a new object. Children, graphics, and sprite can be added later if needed using the AddChild, AddGraphicsDrawer and AddSprite functions respectively.
+// When adding graphics and sprites in this constructor function, use each one's constructor function: newObjectGraphics() and newObjectSprite(). You need to use
+// the versions of these functions with 'object' in the name so that they are linked to the object.
+func NewObject(x, y int, graphics *GraphicsDrawer, sprite *Sprite) *Object {
+	nextAvailableID += 1 // increment ID
+	return &Object{graphics, sprite, x, y, []int{}, nextAvailableID}
+}
+
+// Draws graphics to the terminal like shapes and lines. This is basically to differentiate between objects,
+// so you can use the graphicsDrawer functions outside of the graphicsDrawer if you want, like just calling line(),
+// but you'll have to specify colour and all that stuff with every call. GraphicsDrawer can also be used as
+// a component of an Object struct by calling newGraphicsDrawer() in the constructor for that Object,
+// and then using object.graphicsDrawer.Line().
+//
+// A GraphicsDrawer is required to draw the sprite of an object
+// using the DrawSprite function. The DrawSpecificSprite function draws a specified sprite struct rather than
+// the one attached to the object. This is useful if you have multiple sprites for one object, for whatever reason.
+// Sprite drawing does not take into account the colour and symbol of the graphics drawer.
+// When creating a new graphics drawer and a new object in the same constructor, like so:
+//
+// object := NewObject(x, y, newGraphicsDrawer(colour, bgColour, symbol), sprite)
+//
+// the graphics drawer will automatically be given the same ID as the object, so they will link together.
+// Once linked, the graphics drawer uses the position of the object when drawing. For example, to draw a line from the parent object to 50, 78 you could use:
+//
+// object.graphicsDrawer.Line(x, y, 50, 78) // the x and y values are the parent object's position.
+//
+// You can still use it without x and y and it will work like a normal graphics drawer. However, when linked, and when you do this:
+//
+// object.GraphicsDrawer.DrawSprite()
+//
+// The sprite drawn is actually the sprite value of the parent object. To draw a different sprite, simply use:
+//
+// object.GraphicsDrawer.DrawSpecificSprite(spriteName)
+//
+// The DrawSprite() function isn't available outside of a linked graphicsDrawer. If called by a regular one, it does nothing.
+type GraphicsDrawer struct {
+	colour   string
+	bgColour string
+	x        int // the x of the parent object, if ther is one. 0 if not.
+	y        int // the y of the parent object, if there is one. 0 if not.
+	symbol   string
+	id       int // self ID, 0 if not used as a component of an object.
+}
+
+// Draws a line using the graphics drawer's colour, bgColour and symbol. From (x1, y1) to (x2, y2). Uses Bresenham's line algorithm.
+func (gd *GraphicsDrawer) Line(x1, y1, x2, y2 int) {
+	pixel := gd.colour + gd.bgColour + gd.symbol + Default
+	// Bresenham's line algorithm
+	dx := math.Abs(float64(x2 - x1))
+	dy := math.Abs(float64(y2 - y1))
+	sx := -1
+	if x1 < x2 {
+		sx = 1
+	}
+	sy := -1
+	if y1 < y2 {
+		sy = 1
+	}
+	err := dx - dy
+
+	for {
+		PrintAt(pixel, x1, y1)
+		if x1 == x2 && y1 == y2 {
+			break
+		}
+		err2 := err * 2
+		if err2 > -dy {
+			err -= dy
+			x1 += sx
+		}
+		if err2 < dx {
+			err += dx
+			y1 += sy
+		}
+	}
+}
+
+// Draws a square using the graphics drawer's colour, bgColour and symbol.
+func (gd *GraphicsDrawer) Square(x, y, size int) {
+
+	// precalculate pixel for optimization, also means that if the GraphicsDrawer data is edited, it still keeps printing the same colour
+	pixel := gd.bgColour + gd.colour + gd.symbol
+
+	for i := range size { // rows
+		for k := range size { // columns
+			PrintAt(pixel, x+k, y+i)
+		}
+	}
+}
+
+// writes text into the screen buffer.
+func PrintAt(text string, x, y int) {
+	buffer.WriteString(SMoveCursor(y, x) + text)
+}
+
+// #endregion
 
 // #region Input
 type InputManager struct {
@@ -232,7 +440,8 @@ func (im *InputManager) GetCurrentTypableKey() string {
 // #endregion
 
 // Prints the version number. Same as version(). See version() for more info on how the version number works.
-func Test() {fmt.Println(buildNumber)}
+func Test() { fmt.Println(buildNumber) }
+
 // A developer test function, you can call this in your main function to see if troglodyte has been initialized correctly.
 // Gives the build number for testing purposes. Here's how the version number works:
 // first number: Major version, version 1.0.0 would be the first major stable release. A complete rewrite or restructuring would be a new major version.
@@ -245,7 +454,7 @@ func Test() {fmt.Println(buildNumber)}
 //
 // The version number only goes up for this file, so license changes or changes to other stuff won't change the version numbers but will change the commit
 // identifier or version number on github. It's also not updated automatically, so some bugfix numbers might not be correct.
-func Version() {fmt.Println(buildNumber)}
+func Version() { fmt.Println(buildNumber) }
 
 // Starts troglodyte and prepares the terminal to display graphics. Does not start Input. Use troglodyte.Input.Start()
 // to start the input manager if you need it. Init must be called before any graphics or Input stuff,
@@ -263,6 +472,21 @@ func Init() {
 
 }
 
+func Exit() {
+	RestoreTerminal()
+	os.Exit(0)
+}
+
+// The MainLoop function must be run each frame through a loop on the user end. The user's code handles logic like where characters should move, what
+// the inputs do to affect the gameplay, etc, but once that's done and the variables are changed, they won't visibly change until mainLoop() is called.
+// This function handles the actual rendering of graphics to the terminal screen. The user simply tells the program what to render, through graphicsDrawers,
+// but this function is what actually draws stuff each frame.
+func MainLoop() {
+	buffer.WriteString(CursorHome)         // Move cursor to top-left before drawing the frame
+	os.Stdout.WriteString(buffer.String()) // Write the entire buffer to the terminal
+	buffer.Reset()                         // Clear the buffer for the next frame
+}
+
 // Developer function. This is handled automatically when you call Init.
 // puts the terminal into an alternate screen buffer to preserve previous commands until restoreTerminal is called.
 // This also hides the cursor so you can print without having a blinking cursor flashing across the screen.
@@ -274,14 +498,16 @@ func InitializeTerminal() { fmt.Print("\x1b[?1049h\x1b[?25l") }
 func RestoreTerminal() { fmt.Print("\x1b[?25h\x1b[?1049l") }
 
 // Uses a variable to prevent errors, for temporary usage if you're trying to make many things work at once.
-// Another thing you could do is declare a variable and put this on the same line, like
+// Another thing you could do is declare a variable and put this on the same line, like this:
 //
-// 'var h = "hello"; Use(h);'
+// var h = "hello"; Use(h);
 //
-// to prevent the 'h declared and not used' error. Remeber to remove this when you're done, since it doesn't actually do anything.
+// to prevent the 'h declared and not used' error. Remember to remove this from your code when you're done, since it doesn't actually do anything, and wastes memory.
+// (This was added for my convenience. I'm the kind of programmer to need this kind of thing.)
 func Use(h any) { d := h; h = d }
 
 // Does nothing.
+// (This was added for my convenience. I'm the kind of programmer to need this kind of thing.)
 func Pass() {}
 
 // Clears the terminal screen.
@@ -291,4 +517,7 @@ func ClearScreen() {
 }
 func MoveCursor(row, col int) {
 	fmt.Printf("\033[%d;%dH", row, col)
+}
+func SMoveCursor(row, col int) string {
+	return fmt.Sprintf("\033[%d;%dH", row, col)
 }
