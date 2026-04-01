@@ -4,10 +4,12 @@
 package troglodyte
 
 import (
+	"bufio"
 	"fmt"
 	"math"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,11 +19,12 @@ import (
 )
 
 var (
-	buildNumber = "0.0.9" // The current build number, in the format major.minor.patch. See Version() for more info on how the version number works.
+	buildNumber = "0.0.10" // The current build number, in the format major.minor.patch. See Version() for more info on how the version number works.
 
-	keyHandled      = make(map[string]bool) // flags to prevent continuous key adding
-	buffer          = strings.Builder{}     // the buffer to store graphics, which is all printed at once for speed.
-	nextAvailableID = 0                     // used for creating objects.
+	keyHandled = make(map[string]bool) // flags to prevent continuous key adding
+	// Optimization: bufio.Writer writes directly to the OS buffer, bypasses heavy string allocations.
+	out             = bufio.NewWriterSize(os.Stdout, 1024*64)
+	nextAvailableID = 0 // used for creating objects.
 )
 
 // #region graphics, objects
@@ -213,16 +216,27 @@ func (gd *GraphicsDrawer) Square(x, y, size int) {
 	// precalculate pixel for optimization, also means that if the GraphicsDrawer data is edited, it still keeps printing the same colour
 	pixel := gd.bgColour + gd.colour + gd.symbol
 
-	for i := range size { // rows
-		for k := range size { // columns
+	for i := 0; i < size; i++ { // rows
+		for k := 0; k < size; k++ { // columns
 			PrintAt(pixel, x+k, y+i)
 		}
 	}
 }
 
 // writes text into the screen buffer.
+// Optimization: Writes directly to the buffered writer to avoid string builder overhead.
 func PrintAt(text string, x, y int) {
-	buffer.WriteString(SMoveCursor(y, x) + text)
+	writeMoveCursorFast(y, x)
+	out.WriteString(text)
+}
+
+// writeMoveCursorFast provides an allocation-free way to move the cursor via the buffer.
+func writeMoveCursorFast(row, col int) {
+	out.WriteString("\033[")
+	out.WriteString(strconv.Itoa(row))
+	out.WriteByte(';')
+	out.WriteString(strconv.Itoa(col))
+	out.WriteByte('H')
 }
 
 // #endregion
@@ -482,9 +496,8 @@ func Exit() {
 // This function handles the actual rendering of graphics to the terminal screen. The user simply tells the program what to render, through graphicsDrawers,
 // but this function is what actually draws stuff each frame.
 func MainLoop() {
-	buffer.WriteString(CursorHome)         // Move cursor to top-left before drawing the frame
-	os.Stdout.WriteString(buffer.String()) // Write the entire buffer to the terminal
-	buffer.Reset()                         // Clear the buffer for the next frame
+	out.WriteString(CursorHome) // Move cursor to top-left before drawing the frame
+	out.Flush()                 // Flush the high-speed buffer directly to Stdout
 }
 
 // Developer function. This is handled automatically when you call Init.
@@ -513,11 +526,15 @@ func Pass() {}
 // Clears the terminal screen.
 func ClearScreen() {
 	// \033[H moves to top-left, \033[2J clears the screen buffer
-	fmt.Print("\033[H\033[2J")
+	out.WriteString("\033[H\033[2J")
+	out.Flush()
 }
+
 func MoveCursor(row, col int) {
-	fmt.Printf("\033[%d;%dH", row, col)
+	writeMoveCursorFast(row, col)
+	out.Flush()
 }
+
 func SMoveCursor(row, col int) string {
-	return fmt.Sprintf("\033[%d;%dH", row, col)
+	return "\033[" + strconv.Itoa(row) + ";" + strconv.Itoa(col) + "H"
 }
