@@ -20,7 +20,7 @@ func Example1() {
 	player.AddChild(hat)
 	hat.AddTag("hat") // Add tag to the hat
 
-	troglodyte.Input.Start(false)
+	troglodyte.Input.Start(false) // No mouse required
 
 	// main game loop
 	for {

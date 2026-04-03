@@ -17,7 +17,8 @@ import (
 )
 
 var (
-	buildNumber = "0.0.12" // Build version
+	buildNumber = "0.0.13" // Build version
+	GlobalCircleRatio = 2.0 // the ratio for fixed ratio circles to use, which the x is multiplied by to result in a wider circle, to conter tall terminal characters.
 	out         = bufio.NewWriterSize(os.Stdout, 1024*128)
 
 	// Buffers for differential rendering
@@ -66,15 +67,15 @@ type Pixel struct {
 }
 
 type Sprite struct {
-	X, Y     int
-	Width    int
-	Height   int
+	X, Y     float64 // Current position (float for smooth delta-time)
+	Width    int     // Calculated from pixel data
+	Height   int     // Calculated from pixel data
 	Pixels   [][]Pixel
 	Tags     []string
 	Visible  bool
 	Parent   *Sprite
 	Children []*Sprite
-	mu       sync.RWMutex
+	mu       sync.RWMutex // This PROTECTS the X and Y values
 }
 
 // #endregion
@@ -124,7 +125,7 @@ func NewSprite(x, y int, pixels [][]Pixel) *Sprite {
 	}
 
 	s := &Sprite{
-		X: x, Y: y, Width: w, Height: h,
+		X: float64(x), Y: float64(y), Width: w, Height: h,
 		Pixels: pixels, Visible: true, Tags: []string{},
 	}
 
@@ -141,13 +142,52 @@ func (s *Sprite) AddChild(child *Sprite) {
 	s.Children = append(s.Children, child)
 }
 
-func (s *Sprite) Move(dx, dy int, moveChildren bool) {
+var lastFrameTime = time.Now()
+
+func GetDeltaTime() float64 {
+	now := time.Now()
+	dt := now.Sub(lastFrameTime).Seconds()
+	lastFrameTime = now
+	return dt
+}
+
+func (s *Sprite) Move(dx, dy float64, moveChildren bool) {
+	s.mu.Lock()
 	s.X += dx
 	s.Y += dy
+	s.mu.Unlock() // CRITICAL: Unlock the parent BEFORE moving children
+
 	if moveChildren {
 		for _, child := range s.Children {
+			// This call will create its own independent lock
 			child.Move(dx, dy, true)
 		}
+	}
+}
+
+// Removes a sprite from the scene.
+func (s *Sprite) Destroy() {
+	spriteMu.Lock()
+	defer spriteMu.RUnlock() // Note: Use Lock/Unlock for writing to the slice
+
+	for i, sprite := range allSprites {
+		if sprite == s {
+			// Remove from the global registry
+			allSprites = append(allSprites[:i], allSprites[i+1:]...)
+			break
+		}
+	}
+
+	// If it has a parent, remove it from the parent's children list too
+	if s.Parent != nil {
+		s.Parent.mu.Lock()
+		for i, child := range s.Parent.Children {
+			if child == s {
+				s.Parent.Children = append(s.Parent.Children[:i], s.Parent.Children[i+1:]...)
+				break
+			}
+		}
+		s.Parent.mu.Unlock()
 	}
 }
 
@@ -163,14 +203,21 @@ func (s *Sprite) HasTag(tag string) bool {
 }
 
 func (s *Sprite) Draw() {
-	if !s.Visible {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.Visible || s.Pixels == nil {
 		return
 	}
-	offsetX := s.X - (s.Width / 2)
-	offsetY := s.Y - (s.Height / 2)
+
+	// Crucial: Cast to int AFTER the math to prevent jitter
+	// We use floor math to ensure the sprite stays on the integer grid correctly
+	offsetX := int(math.Round(s.X)) - (s.Width / 2)
+	offsetY := int(math.Round(s.Y)) - (s.Height / 2)
 
 	for y, row := range s.Pixels {
 		for x, px := range row {
+			// SetPixel handles the bounds checking internally
 			SetPixel(offsetX+x, offsetY+y, px)
 		}
 	}
@@ -178,8 +225,12 @@ func (s *Sprite) Draw() {
 
 func DrawAllSprites() {
 	spriteMu.RLock()
-	defer spriteMu.RUnlock()
-	for _, s := range allSprites {
+	// Create a local copy of pointers so we don't hold the Registry lock for long
+	tempSprites := make([]*Sprite, len(allSprites))
+	copy(tempSprites, allSprites)
+	spriteMu.RUnlock()
+
+	for _, s := range tempSprites {
 		s.Draw()
 	}
 }
@@ -233,6 +284,155 @@ func DrawRect(x, y, w, h int, char, fg, bg string) {
 	for i := 0; i < h; i++ {
 		for j := 0; j < w; j++ {
 			SetPixel(x+j, y+i, p)
+		}
+	}
+}
+
+// DrawCircle draws the outline of a circle.
+// If fixRatio is true, it scales the X axis to account for tall terminal characters.
+func DrawCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
+	x := 0
+	y := r
+	d := 3 - 2*r
+	p := Pixel{char, fg, bg}
+
+	// Ratio multiplier (2.0 is standard for most terminals)
+	ratio := 1.0
+	if fixRatio {
+		ratio = GlobalCircleRatio
+	}
+
+	drawPoints := func(xc, yc, x, y int, p Pixel) {
+		// We multiply the X offset by the ratio before casting to int
+		SetPixel(xc+int(float64(x)*ratio), yc+y, p)
+		SetPixel(xc-int(float64(x)*ratio), yc+y, p)
+		SetPixel(xc+int(float64(x)*ratio), yc-y, p)
+		SetPixel(xc-int(float64(x)*ratio), yc-y, p)
+		
+		SetPixel(xc+int(float64(y)*ratio), yc+x, p)
+		SetPixel(xc-int(float64(y)*ratio), yc+x, p)
+		SetPixel(xc+int(float64(y)*ratio), yc-x, p)
+		SetPixel(xc-int(float64(y)*ratio), yc-x, p)
+	}
+
+	drawPoints(xc, yc, x, y, p)
+	for y >= x {
+		x++
+		if d > 0 {
+			y--
+			d = d + 4*(x-y) + 10
+		} else {
+			d = d + 4*x + 6
+		}
+		drawPoints(xc, yc, x, y, p)
+	}
+}
+
+// DrawTriangle draws a triangle. The resulting triangle is guaranteed to have three sides. 
+// These sides are guaranteed to be straight lines. The shape is guaranteed to have three corners and it is also guaranteed that the angles on the inside of the
+// triangle all add up to exactly 180 degrees. This triangle is also GUARANTEED to have at least zero sides, and less than 50 sides. It is also guaranteed 
+func DrawTriangle(x1, y1, x2, y2, x3, y3 int, char, fg, bg string) {
+	DrawLine(x1, y1, x2, y2, char, fg, bg)
+	DrawLine(x2, y2, x3, y3, char, fg, bg)
+	DrawLine(x3, y3, x1, y1, char, fg, bg)
+}
+
+// DrawFilledTriangle draws a filled triangle.
+// It is guaranteed that this triangle will have all thes ame guarantees as the triangle created by DrawTriangle.
+func DrawFilledTriangle(x1, y1, x2, y2, x3, y3 int, char, fg, bg string) {
+	// 1. Sort points by Y (y1 <= y2 <= y3)
+	if y1 > y2 { x1, x2, y1, y2 = x2, x1, y2, y1 }
+	if y1 > y3 { x1, x3, y1, y3 = x3, x1, y3, y1 }
+	if y2 > y3 { x2, x3, y2, y3 = x3, x2, y3, y2 }
+
+	p := Pixel{char, fg, bg}
+
+	// 2. Helper to draw horizontal lines
+	line := func(y int, sx, ex float64) {
+		if sx > ex { sx, ex = ex, sx }
+		for x := int(math.Round(sx)); x <= int(math.Round(ex)); x++ {
+			SetPixel(x, y, p)
+		}
+	}
+
+	// 3. Fill the triangle
+	if y1 == y3 { return } // Zero height
+
+	for y := y1; y <= y3; y++ {
+		// Calculate the x-coordinates for the edges at this Y
+		// We use the full height for the long edge (1-3)
+		alpha := float64(y-y1) / float64(y3-y1)
+		xLong := float64(x1) + (float64(x3-x1) * alpha)
+
+		var xShort float64
+		if y < y2 {
+			// Top half (edge 1-2)
+			beta := float64(y-y1) / float64(y2-y1)
+			xShort = float64(x1) + (float64(x2-x1) * beta)
+		} else if y2 != y3 {
+			// Bottom half (edge 2-3)
+			beta := float64(y-y2) / float64(y3-y2)
+			xShort = float64(x2) + (float64(x3-x2) * beta)
+		} else {
+			xShort = float64(x2)
+		}
+		line(y, xLong, xShort)
+	}
+}
+
+// DrawQuad draws a 4-sided polygon (quadrilateral) by connecting four points.
+// Points should be provided in clockwise or counter-clockwise order.
+func DrawQuad(x1, y1, x2, y2, x3, y3, x4, y4 int, char, fg, bg string) {
+	// Connect p1 to p2
+	DrawLine(x1, y1, x2, y2, char, fg, bg)
+	// Connect p2 to p3
+	DrawLine(x2, y2, x3, y3, char, fg, bg)
+	// Connect p3 to p4
+	DrawLine(x3, y3, x4, y4, char, fg, bg)
+	// Connect p4 back to p1
+	DrawLine(x4, y4, x1, y1, char, fg, bg)
+}
+
+// DrawFilledQuad draws a filled in quadrilateral, making use of two DrawFilledTriangle calls.
+func DrawFilledQuad(x1, y1, x2, y2, x3, y3, x4, y4 int, char, fg, bg string) {
+	DrawFilledTriangle(x1, y1, x2, y2, x3, y3, char, fg, bg)
+	DrawFilledTriangle(x1, y1, x3, y3, x4, y4, char, fg, bg)
+}
+
+// DrawFilledCircle draws a solid disk.
+// If fixRatio is true, it scales the X axis to account for tall terminal characters.
+func DrawFilledCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
+	x := 0
+	y := r
+	d := 3 - 2*r
+	p := Pixel{char, fg, bg}
+
+	ratio := 1.0
+	if fixRatio {
+		ratio = GlobalCircleRatio
+	}
+
+	fillLine := func(xCenter, xOffset, y int) {
+		// Calculate the start and end of the horizontal line using the ratio
+		xStart := xCenter - int(float64(xOffset)*ratio)
+		xEnd := xCenter + int(float64(xOffset)*ratio)
+		for i := xStart; i <= xEnd; i++ {
+			SetPixel(i, y, p)
+		}
+	}
+
+	for y >= x {
+		fillLine(xc, x, yc+y)
+		fillLine(xc, x, yc-y)
+		fillLine(xc, y, yc+x)
+		fillLine(xc, y, yc-x)
+
+		x++
+		if d > 0 {
+			y--
+			d = d + 4*(x-y) + 10
+		} else {
+			d = d + 4*x + 6
 		}
 	}
 }
@@ -297,23 +497,40 @@ func writeMoveCursorFast(row, col int) {
 // #endregion
 
 // #region Input Manager
+
 type InputManager struct {
 	mu             sync.RWMutex
 	PressedKeys    map[string]bool
 	mouseX, mouseY int
-	clicked        bool
+	leftDown       bool
 }
 
 var Input = &InputManager{
 	PressedKeys: make(map[string]bool),
 }
 
+// IsPressed checks if a keyboard key is currently in the active buffer.
+func (im *InputManager) IsPressed(key string) bool {
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+	return im.PressedKeys[key]
+}
+
+// GetMouse returns the current X, Y, and the HELD state of the left button.
+func (im *InputManager) GetMouse() (int, int, bool) {
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+	return im.mouseX, im.mouseY, im.leftDown
+}
+
+// Starts the input manager, which you can use via troglodyte.Input. The useMouse parameter tells the input manager whether or not to use the mouse.
 func (im *InputManager) Start(useMouse bool) {
 	if useMouse {
 		fmt.Print("\033[?1003h\033[?1006h")
 	}
+
 	go func() {
-		b := make([]byte, 64)
+		b := make([]byte, 128)
 		for {
 			n, err := os.Stdin.Read(b)
 			if err != nil {
@@ -321,41 +538,37 @@ func (im *InputManager) Start(useMouse bool) {
 			}
 			inputStr := string(b[:n])
 
-			im.mu.Lock()
+			// 1. Handle Mouse (SGR Protocol)
 			if strings.HasPrefix(inputStr, "\x1b[<") {
-				fmt.Sscanf(inputStr, "\x1b[<%d;%d;%d", new(int), &im.mouseX, &im.mouseY)
-				im.clicked = strings.HasSuffix(inputStr, "M")
+				var button, x, y int
+				var mode rune
+				_, err := fmt.Sscanf(inputStr, "\x1b[<%d;%d;%d%c", &button, &x, &y, &mode)
+
+				if err == nil {
+					im.mu.Lock() // Lock only when writing mouse data
+					im.mouseX, im.mouseY = x, y
+					if button == 0 || button == 32 {
+						im.leftDown = (mode == 'M')
+					} else if mode == 'm' {
+						im.leftDown = false
+					}
+					im.mu.Unlock()
+				}
 			} else {
-				key := inputStr
-				if n == 1 && b[0] == 27 {
-					key = "ESC"
-				}
-				if n == 1 && b[0] == 13 {
-					key = "ENTER"
-				}
-				im.PressedKeys[key] = true
+				// 2. Keyboard Logic
+				im.mu.Lock()
+				im.PressedKeys[inputStr] = true
+				im.mu.Unlock()
+
 				go func(k string) {
-					time.Sleep(50 * time.Millisecond)
+					time.Sleep(250 * time.Millisecond)
 					im.mu.Lock()
 					delete(im.PressedKeys, k)
 					im.mu.Unlock()
-				}(key)
+				}(inputStr)
 			}
-			im.mu.Unlock()
 		}
 	}()
-}
-
-func (im *InputManager) GetMouse() (int, int, bool) {
-	im.mu.RLock()
-	defer im.mu.RUnlock()
-	return im.mouseX, im.mouseY, im.clicked
-}
-
-func (im *InputManager) IsPressed(key string) bool {
-	im.mu.RLock()
-	defer im.mu.RUnlock()
-	return im.PressedKeys[key]
 }
 
 // #endregion
