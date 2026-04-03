@@ -17,10 +17,15 @@ import (
 )
 
 var (
-	buildNumber = "0.0.11" // Updated version for the Scene Tree rewrite
-	out         = bufio.NewWriterSize(os.Stdout, 1024*64)
+	buildNumber = "0.0.12" // Build version
+	out         = bufio.NewWriterSize(os.Stdout, 1024*128)
 
-	// Global Registry for DrawAll and Tagged drawing
+	// Buffers for differential rendering
+	backBuffer   [][]Pixel
+	frontBuffer  [][]Pixel
+	termW, termH int
+
+	// Global Registry
 	allSprites []*Sprite
 	spriteMu   sync.RWMutex
 )
@@ -54,23 +59,19 @@ const (
 
 // #region Core Types
 
-// Pixel represents a single character cell in the terminal.
 type Pixel struct {
 	Char     string
 	FgColour string
 	BgColour string
 }
 
-// Sprite is the fundamental building block of Troglodyte.
-// It acts as a node in the Scene Tree and a graphical object.
 type Sprite struct {
-	X, Y    int       // Coordinates of the CENTRE of the sprite
-	Width   int       // Calculated automatically
-	Height  int       // Calculated automatically
-	Pixels  [][]Pixel // Row-major: [y][x]
-	Tags    []string
-	Visible bool
-
+	X, Y     int
+	Width    int
+	Height   int
+	Pixels   [][]Pixel
+	Tags     []string
+	Visible  bool
 	Parent   *Sprite
 	Children []*Sprite
 	mu       sync.RWMutex
@@ -78,10 +79,43 @@ type Sprite struct {
 
 // #endregion
 
-// #region Sprite Management
+// #region Buffer Management
 
-// NewSprite creates a new sprite and adds it to the global registry.
-// Pixels should be provided as [rows][columns].
+// initBuffers initializes the grids based on current terminal size.
+func initBuffers() {
+	w, h, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		w, h = 80, 24 // Fallback
+	}
+	termW, termH = w, h
+
+	backBuffer = make([][]Pixel, termH)
+	frontBuffer = make([][]Pixel, termH)
+	for i := range backBuffer {
+		backBuffer[i] = make([]Pixel, termW)
+		frontBuffer[i] = make([]Pixel, termW)
+		for j := 0; j < termW; j++ {
+			empty := Pixel{Char: " ", FgColour: Default, BgColour: BgDefault}
+			backBuffer[i][j] = empty
+			frontBuffer[i][j] = empty
+		}
+	}
+}
+
+// SetPixel is the internal engine function to write to the backbuffer.
+func SetPixel(x, y int, p Pixel) {
+	// Terminal coordinates are 1-based for users, but 0-based for our buffer logic.
+	// We adjust here so the user can think in 1-based terminal coords.
+	tx, ty := x-1, y-1
+	if ty >= 0 && ty < termH && tx >= 0 && tx < termW {
+		backBuffer[ty][tx] = p
+	}
+}
+
+// #endregion
+
+// #region Sprite Logic
+
 func NewSprite(x, y int, pixels [][]Pixel) *Sprite {
 	h := len(pixels)
 	w := 0
@@ -90,13 +124,8 @@ func NewSprite(x, y int, pixels [][]Pixel) *Sprite {
 	}
 
 	s := &Sprite{
-		X:       x,
-		Y:       y,
-		Width:   w,
-		Height:  h,
-		Pixels:  pixels,
-		Visible: true,
-		Tags:    []string{},
+		X: x, Y: y, Width: w, Height: h,
+		Pixels: pixels, Visible: true, Tags: []string{},
 	}
 
 	spriteMu.Lock()
@@ -105,7 +134,6 @@ func NewSprite(x, y int, pixels [][]Pixel) *Sprite {
 	return s
 }
 
-// AddChild links a child sprite to this parent.
 func (s *Sprite) AddChild(child *Sprite) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -113,11 +141,9 @@ func (s *Sprite) AddChild(child *Sprite) {
 	s.Children = append(s.Children, child)
 }
 
-// Move changes the sprite's position. If moveChildren is true, the delta is applied to all descendants.
 func (s *Sprite) Move(dx, dy int, moveChildren bool) {
 	s.X += dx
 	s.Y += dy
-
 	if moveChildren {
 		for _, child := range s.Children {
 			child.Move(dx, dy, true)
@@ -125,12 +151,8 @@ func (s *Sprite) Move(dx, dy int, moveChildren bool) {
 	}
 }
 
-// AddTag adds a descriptive tag for group operations.
-func (s *Sprite) AddTag(tag string) {
-	s.Tags = append(s.Tags, tag)
-}
+func (s *Sprite) AddTag(tag string) { s.Tags = append(s.Tags, tag) }
 
-// HasTag checks if the sprite contains a specific tag.
 func (s *Sprite) HasTag(tag string) bool {
 	for _, t := range s.Tags {
 		if t == tag {
@@ -140,36 +162,20 @@ func (s *Sprite) HasTag(tag string) bool {
 	return false
 }
 
-// #endregion
-
-// #region Rendering Logic
-
-// Draw renders the sprite to the buffer using its centre offset.
 func (s *Sprite) Draw() {
 	if !s.Visible {
 		return
 	}
-
-	// Calculate top-left based on centre-pivot
 	offsetX := s.X - (s.Width / 2)
 	offsetY := s.Y - (s.Height / 2)
 
 	for y, row := range s.Pixels {
 		for x, px := range row {
-			targetX := offsetX + x
-			targetY := offsetY + y
-
-			// Simple bounds check (terminal is generally 1-indexed for cursor)
-			if targetX < 1 || targetY < 1 {
-				continue
-			}
-
-			PrintAt(px.FgColour+px.BgColour+px.Char+Default+BgDefault, targetX, targetY)
+			SetPixel(offsetX+x, offsetY+y, px)
 		}
 	}
 }
 
-// DrawAllSprites renders every sprite currently registered in the engine.
 func DrawAllSprites() {
 	spriteMu.RLock()
 	defer spriteMu.RUnlock()
@@ -178,7 +184,6 @@ func DrawAllSprites() {
 	}
 }
 
-// DrawSpritesWithTag renders only sprites that possess the specified tag.
 func DrawSpritesWithTag(tag string) {
 	spriteMu.RLock()
 	defer spriteMu.RUnlock()
@@ -193,7 +198,6 @@ func DrawSpritesWithTag(tag string) {
 
 // #region Standalone Graphics
 
-// DrawLine draws a line between two points using Bresenham's algorithm.
 func DrawLine(x1, y1, x2, y2 int, char, fg, bg string) {
 	dx := int(math.Abs(float64(x2 - x1)))
 	dy := -int(math.Abs(float64(y2 - y1)))
@@ -205,9 +209,10 @@ func DrawLine(x1, y1, x2, y2 int, char, fg, bg string) {
 		sy = 1
 	}
 	err := dx + dy
+	p := Pixel{char, fg, bg}
 
 	for {
-		PrintAt(fg+bg+char+Default+BgDefault, x1, y1)
+		SetPixel(x1, y1, p)
 		if x1 == x2 && y1 == y2 {
 			break
 		}
@@ -223,30 +228,27 @@ func DrawLine(x1, y1, x2, y2 int, char, fg, bg string) {
 	}
 }
 
-// DrawRect draws a filled rectangle.
 func DrawRect(x, y, w, h int, char, fg, bg string) {
-	pixel := fg + bg + char + Default + BgDefault
+	p := Pixel{char, fg, bg}
 	for i := 0; i < h; i++ {
-		writeMoveCursorFast(y+i, x)
 		for j := 0; j < w; j++ {
-			out.WriteString(pixel)
+			SetPixel(x+j, y+i, p)
 		}
 	}
 }
 
 // #endregion
 
-// #region System & Terminal
+// #region System & Rendering
 
-// Init prepares the terminal and returns a restore function to be deferred.
 func Init() func() {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		panic(err)
 	}
 
-	// Enter alt buffer and hide cursor
 	fmt.Print("\x1b[?1049h\x1b[?25l")
+	initBuffers()
 
 	return func() {
 		fmt.Print("\x1b[?25h\x1b[?1049l")
@@ -254,14 +256,34 @@ func Init() func() {
 	}
 }
 
+// MainLoop performs the differential render.
 func MainLoop() {
-	out.Flush()
-	out.WriteString(CursorHome)
-}
+	lastFg, lastBg := "", ""
 
-func PrintAt(text string, x, y int) {
-	writeMoveCursorFast(y, x)
-	out.WriteString(text)
+	for y := 0; y < termH; y++ {
+		for x := 0; x < termW; x++ {
+			back := backBuffer[y][x]
+			front := frontBuffer[y][x]
+
+			// Only draw if the backbuffer pixel differs from what's already on screen
+			if back != front {
+				writeMoveCursorFast(y+1, x+1)
+
+				// Optimization: Only send color codes if they changed from the LAST character printed
+				if back.FgColour != lastFg || back.BgColour != lastBg {
+					out.WriteString(back.FgColour + back.BgColour)
+					lastFg, lastBg = back.FgColour, back.BgColour
+				}
+
+				out.WriteString(back.Char)
+				frontBuffer[y][x] = back // Update frontbuffer
+			}
+
+			// Clear backbuffer for next frame
+			backBuffer[y][x] = Pixel{Char: " ", FgColour: Default, BgColour: BgDefault}
+		}
+	}
+	out.Flush()
 }
 
 func writeMoveCursorFast(row, col int) {
@@ -272,13 +294,9 @@ func writeMoveCursorFast(row, col int) {
 	out.WriteByte('H')
 }
 
-func ClearScreen() {
-	out.WriteString("\033[H\033[2J")
-}
-
 // #endregion
 
-// #region Input Manager (Updated)
+// #region Input Manager
 type InputManager struct {
 	mu             sync.RWMutex
 	PressedKeys    map[string]bool
@@ -308,7 +326,6 @@ func (im *InputManager) Start(useMouse bool) {
 				fmt.Sscanf(inputStr, "\x1b[<%d;%d;%d", new(int), &im.mouseX, &im.mouseY)
 				im.clicked = strings.HasSuffix(inputStr, "M")
 			} else {
-				// Simple key mapping
 				key := inputStr
 				if n == 1 && b[0] == 27 {
 					key = "ESC"
@@ -344,3 +361,10 @@ func (im *InputManager) IsPressed(key string) bool {
 // #endregion
 
 func Version() { fmt.Println("Troglodyte Engine v" + buildNumber) }
+
+// GetTerminalSize returns the current width and height of the terminal window.
+// This matches the boundaries of the drawing buffer.
+func GetTerminalSize() (int, int) {
+	// We return the engine's internal tracking of the size.
+	return termW, termH
+}

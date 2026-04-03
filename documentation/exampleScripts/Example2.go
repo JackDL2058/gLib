@@ -12,7 +12,6 @@ func Example2() {
 	troglodyte.Input.Start(true) // Enable mouse
 
 	for {
-		troglodyte.ClearScreen()
 		
 		mx, my, clicked := troglodyte.Input.GetMouse()
 		

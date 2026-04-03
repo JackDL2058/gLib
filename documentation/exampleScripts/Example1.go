@@ -24,7 +24,6 @@ func Example1() {
 
 	// main game loop
 	for {
-		troglodyte.ClearScreen()
 		
 		if troglodyte.Input.IsPressed("w") { player.Move(0, -1, true) }
 		if troglodyte.Input.IsPressed("s") { player.Move(0, 1, true) }
