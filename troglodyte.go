@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +18,9 @@ import (
 )
 
 var (
-	buildNumber = "0.0.13" // Build version
-	GlobalCircleRatio = 2.0 // the ratio for fixed ratio circles to use, which the x is multiplied by to result in a wider circle, to conter tall terminal characters.
-	out         = bufio.NewWriterSize(os.Stdout, 1024*128)
+	BuildNumber       = "0.0.14" // Build version
+	GlobalCircleRatio = 2.0      // the ratio for fixed ratio circles to use, which the x is multiplied by to result in a wider circle, to conter tall terminal characters.
+	out               = bufio.NewWriterSize(os.Stdout, 1024*128)
 
 	// Buffers for differential rendering
 	backBuffer   [][]Pixel
@@ -33,24 +34,43 @@ var (
 
 // #region Constants & ANSI
 const (
-	Black      = "\033[30m"
-	Red        = "\033[31m"
-	Green      = "\033[32m"
-	Yellow     = "\033[33m"
-	Blue       = "\033[34m"
-	Magenta    = "\033[35m"
-	Cyan       = "\033[36m"
-	White      = "\033[37m"
-	Default    = "\033[39m"
-	BgBlack    = "\033[40m"
-	BgRed      = "\033[41m"
-	BgGreen    = "\033[42m"
-	BgYellow   = "\033[43m"
-	BgBlue     = "\033[44m"
-	BgMagenta  = "\033[45m"
-	BgCyan     = "\033[46m"
-	BgWhite    = "\033[47m"
-	BgDefault  = "\033[49m"
+	// 19,19,19 (#131313)
+	Black = "\033[30m"
+
+	// 196,36,48 (#C42430)
+	Red = "\033[31m"
+
+	// 51,152,75 (#33984B)
+	Green = "\033[32m"
+
+	// 255,235,87 (#FFEB57)
+	Yellow = "\033[33m"
+
+	// 48,3,217 (#3003D9)
+	Blue = "\033[34m"
+
+	// 219,63,253 (#DB3FFD)
+	Magenta = "\033[35m"
+
+	// 15,155,155 (#0F9B9B)
+	Cyan = "\033[36m"
+
+	// 255,255,255 (#FFFFFF)
+	White = "\033[37m"
+
+	// Alpha: less than 255
+	Default = "\033[39m"
+
+	BgBlack   = "\033[40m"
+	BgRed     = "\033[41m"
+	BgGreen   = "\033[42m"
+	BgYellow  = "\033[43m"
+	BgBlue    = "\033[44m"
+	BgMagenta = "\033[45m"
+	BgCyan    = "\033[46m"
+	BgWhite   = "\033[47m"
+	BgDefault = "\033[49m"
+
 	CursorHome = "\033[H"
 	HideCursor = "\033[?25l"
 	ShowCursor = "\033[?25h"
@@ -66,16 +86,23 @@ type Pixel struct {
 	BgColour string
 }
 
+// A sprite is a basic object in troglodyte. It can move, have pixel data, and will soon have support for animated textures.
+// You also don't have to make the sprite data yourself! Import github.com/JackDL2058/troglodyte/troglosprite to download
+// troglosprite, the newest tool for use along side troglodyte. It can take a png image and turn it into troglodyte pixel
+// data, meaning you can simply draw your sprite in something like aseprite and convert to pixel data. There will also be an
+// editor to make sprites and export the sprite data in future. Disclaimer: troglosprite can only use specific colours and will
+// not convert any colour to pixel data. You can download the colour palette from
 type Sprite struct {
-	X, Y     float64 // Current position (float for smooth delta-time)
-	Width    int     // Calculated from pixel data
-	Height   int     // Calculated from pixel data
-	Pixels   [][]Pixel
-	Tags     []string
-	Visible  bool
-	Parent   *Sprite
-	Children []*Sprite
-	mu       sync.RWMutex // This PROTECTS the X and Y values
+	X, Y         float64 // Current position (float for smooth delta-time)
+	Width        int     // Calculated from pixel data
+	Height       int     // Calculated from pixel data
+	Pixels       [][]Pixel
+	Tags         []string
+	Visible      bool
+	Parent       *Sprite
+	Children     []*Sprite
+	mu           sync.RWMutex // This PROTECTS the X and Y values
+	PrevX, PrevY float64      // The previous x and y position, useful for stuff like snake or anythhing that follows something else.
 }
 
 // #endregion
@@ -151,10 +178,13 @@ func GetDeltaTime() float64 {
 	return dt
 }
 
+// Moves a sprite by a certain distance, adding dx and dy to the sprite's position, and does the same to children if moveChildren is true.
 func (s *Sprite) Move(dx, dy float64, moveChildren bool) {
 	s.mu.Lock()
+
 	s.X += dx
 	s.Y += dy
+
 	s.mu.Unlock() // CRITICAL: Unlock the parent BEFORE moving children
 
 	if moveChildren {
@@ -165,7 +195,25 @@ func (s *Sprite) Move(dx, dy float64, moveChildren bool) {
 	}
 }
 
-// Removes a sprite from the scene.
+// Moves a sprite directly to a target position, like moving directly to the mouse's position. Prevents having to
+// calculate the relative x and y to a target position as you would when using Move(). Does the same to children if moveChildren is true.
+func (s *Sprite) MoveDirect(x, y float64, moveChildren bool) {
+	s.mu.Lock()
+
+	s.X = x
+	s.Y = y
+	s.mu.Unlock() // CRITICAL: Unlock the parent BEFORE moving children
+
+	if moveChildren {
+		for _, child := range s.Children {
+			// This call will create its own independent lock
+			child.MoveDirect(x, y, true)
+		}
+	}
+}
+
+// Removes a sprite from the scene, as well as all of its children. This simply stops tracking it and its children, so the sprite can be added back by using
+// AddSpriteBack().
 func (s *Sprite) Destroy() {
 	spriteMu.Lock()
 	defer spriteMu.RUnlock() // Note: Use Lock/Unlock for writing to the slice
@@ -191,16 +239,40 @@ func (s *Sprite) Destroy() {
 	}
 }
 
+// Adds a sprite back to the game after it's been deleted by the Destroy() method by adding it to allSprites and restoring its visibility.
+func (s *Sprite) AddSpriteBack() {
+	spriteMu.Lock()
+	defer spriteMu.Unlock()
+
+	// Add back to the global registry if not already present
+	found := slices.Contains(allSprites, s)
+	if !found {
+		allSprites = append(allSprites, s)
+	}
+
+	// If it has a parent, add it back to the parent's children list if not already there
+	if s.Parent != nil {
+		s.Parent.mu.Lock()
+		found = false
+		for _, child := range s.Parent.Children {
+			if child == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.Parent.Children = append(s.Parent.Children, s)
+		}
+		s.Parent.mu.Unlock()
+	}
+
+	// Make sure it's visible
+	s.Visible = true
+}
+
 func (s *Sprite) AddTag(tag string) { s.Tags = append(s.Tags, tag) }
 
-func (s *Sprite) HasTag(tag string) bool {
-	for _, t := range s.Tags {
-		if t == tag {
-			return true
-		}
-	}
-	return false
-}
+func (s *Sprite) HasTag(tag string) bool { return slices.Contains(s.Tags, tag) }
 
 func (s *Sprite) Draw() {
 	s.mu.RLock()
@@ -308,7 +380,7 @@ func DrawCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
 		SetPixel(xc-int(float64(x)*ratio), yc+y, p)
 		SetPixel(xc+int(float64(x)*ratio), yc-y, p)
 		SetPixel(xc-int(float64(x)*ratio), yc-y, p)
-		
+
 		SetPixel(xc+int(float64(y)*ratio), yc+x, p)
 		SetPixel(xc-int(float64(y)*ratio), yc+x, p)
 		SetPixel(xc+int(float64(y)*ratio), yc-x, p)
@@ -328,9 +400,9 @@ func DrawCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
 	}
 }
 
-// DrawTriangle draws a triangle. The resulting triangle is guaranteed to have three sides. 
+// DrawTriangle draws a triangle. The resulting triangle is guaranteed to have three sides.
 // These sides are guaranteed to be straight lines. The shape is guaranteed to have three corners and it is also guaranteed that the angles on the inside of the
-// triangle all add up to exactly 180 degrees. This triangle is also GUARANTEED to have at least zero sides, and less than 50 sides. It is also guaranteed 
+// triangle all add up to exactly 180 degrees. This triangle is also GUARANTEED to have at least zero sides, and less than 50 sides. It is also guaranteed
 func DrawTriangle(x1, y1, x2, y2, x3, y3 int, char, fg, bg string) {
 	DrawLine(x1, y1, x2, y2, char, fg, bg)
 	DrawLine(x2, y2, x3, y3, char, fg, bg)
@@ -341,22 +413,32 @@ func DrawTriangle(x1, y1, x2, y2, x3, y3 int, char, fg, bg string) {
 // It is guaranteed that this triangle will have all thes ame guarantees as the triangle created by DrawTriangle.
 func DrawFilledTriangle(x1, y1, x2, y2, x3, y3 int, char, fg, bg string) {
 	// 1. Sort points by Y (y1 <= y2 <= y3)
-	if y1 > y2 { x1, x2, y1, y2 = x2, x1, y2, y1 }
-	if y1 > y3 { x1, x3, y1, y3 = x3, x1, y3, y1 }
-	if y2 > y3 { x2, x3, y2, y3 = x3, x2, y3, y2 }
+	if y1 > y2 {
+		x1, x2, y1, y2 = x2, x1, y2, y1
+	}
+	if y1 > y3 {
+		x1, x3, y1, y3 = x3, x1, y3, y1
+	}
+	if y2 > y3 {
+		x2, x3, y2, y3 = x3, x2, y3, y2
+	}
 
 	p := Pixel{char, fg, bg}
 
 	// 2. Helper to draw horizontal lines
 	line := func(y int, sx, ex float64) {
-		if sx > ex { sx, ex = ex, sx }
+		if sx > ex {
+			sx, ex = ex, sx
+		}
 		for x := int(math.Round(sx)); x <= int(math.Round(ex)); x++ {
 			SetPixel(x, y, p)
 		}
 	}
 
 	// 3. Fill the triangle
-	if y1 == y3 { return } // Zero height
+	if y1 == y3 {
+		return
+	} // Zero height
 
 	for y := y1; y <= y3; y++ {
 		// Calculate the x-coordinates for the edges at this Y
@@ -573,7 +655,7 @@ func (im *InputManager) Start(useMouse bool) {
 
 // #endregion
 
-func Version() { fmt.Println("Troglodyte Engine v" + buildNumber) }
+func Version() { fmt.Println("Troglodyte Engine v" + BuildNumber) }
 
 // GetTerminalSize returns the current width and height of the terminal window.
 // This matches the boundaries of the drawing buffer.

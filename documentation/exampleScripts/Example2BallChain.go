@@ -5,7 +5,7 @@ import (
 	"github.com/JackDL2058/troglodyte"
 )
 
-func Example2() {
+func BallChain() {
 	restore := troglodyte.Init()
 	defer restore()
 
@@ -14,15 +14,17 @@ func Example2() {
 	for {
 		
 		mx, my, clicked := troglodyte.Input.GetMouse()
+		w, _ := troglodyte.GetTerminalSize()
 		
 		color := troglodyte.White
 		if clicked { color = troglodyte.Green }
 		
 		// Draw a line from the top corner to the mouse
-		troglodyte.DrawLine(1, 1, mx, my, "·", color, troglodyte.BgBlack)
+		troglodyte.DrawLine(w/2, 1, mx, my, "·", color, troglodyte.BgBlack)
 		
 		// Draw a rectangle at the mouse
-		troglodyte.DrawRect(mx, my, 4, 2, "▒", troglodyte.Cyan, troglodyte.BgBlack)
+		troglodyte.DrawRect(mx-2, my, 5, 2, "▒", troglodyte.Cyan, troglodyte.BgBlack)
+
 		
 		troglodyte.MainLoop()
 		time.Sleep(16 * time.Millisecond)

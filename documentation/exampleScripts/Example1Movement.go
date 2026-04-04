@@ -5,7 +5,7 @@ import (
 	"github.com/JackDL2058/troglodyte"
 )
 
-func Example1() {
+func Movement1Example1() {
 	restore := troglodyte.Init()
 	defer restore()
 
