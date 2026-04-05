@@ -18,9 +18,9 @@ import (
 )
 
 var (
-	BuildNumber       = "0.0.14" // Build version
-	GlobalCircleRatio = 2.0      // the ratio for fixed ratio circles to use, which the x is multiplied by to result in a wider circle, to conter tall terminal characters.
-	out               = bufio.NewWriterSize(os.Stdout, 1024*128)
+	BuildNumber    = "0.0.15" // Build version
+	GlobalFixRatio = 2.0      // the ratio for fixed ratio shapes to use, which the x is multiplied by to result in a wider circle, to counter tall terminal characters.
+	out            = bufio.NewWriterSize(os.Stdout, 1024*128)
 
 	// Buffers for differential rendering
 	backBuffer   [][]Pixel
@@ -30,6 +30,14 @@ var (
 	// Global Registry
 	allSprites []*Sprite
 	spriteMu   sync.RWMutex
+)
+
+type projection int
+
+const (
+	orthogonal projection = iota
+	perspective
+	isometric
 )
 
 // #region Constants & ANSI
@@ -91,7 +99,7 @@ type Pixel struct {
 // troglosprite, the newest tool for use along side troglodyte. It can take a png image and turn it into troglodyte pixel
 // data, meaning you can simply draw your sprite in something like aseprite and convert to pixel data. There will also be an
 // editor to make sprites and export the sprite data in future. Disclaimer: troglosprite can only use specific colours and will
-// not convert any colour to pixel data. You can download the colour palette from
+// not convert any colour to pixel data. You can download the colour palette from lospec.
 type Sprite struct {
 	X, Y         float64 // Current position (float for smooth delta-time)
 	Width        int     // Calculated from pixel data
@@ -102,7 +110,21 @@ type Sprite struct {
 	Parent       *Sprite
 	Children     []*Sprite
 	mu           sync.RWMutex // This PROTECTS the X and Y values
-	PrevX, PrevY float64      // The previous x and y position, useful for stuff like snake or anythhing that follows something else.
+	PrevX, PrevY float64      // The previous x and y position, useful for stuff like snake or anything that follows something else.
+}
+
+// A wall object in fake 3D. only works if troglodyte.Fake3DInit() has been called. Has nothing to do with True3D.
+// This is essentially a line with 2 positions for either end. There might be an editor or something like that in future to make these easier to manage.
+// To create one, use the NewFake3dWall function.
+type Fake3dWall struct {
+	X1             float64
+	X2             float64
+	Y1             float64
+	Y2             float64
+	Colour         string   // The colour code of the wall
+	FallbackSymbol string   // the symbol to use if angle dither fails. If angle dither is off, this is used as the symbol.
+	AngleDither    bool     // whether to dither based on the angle of a wall relative to the camera. If false, uses FallbackSymbol.
+	Tags           []string // Slice of tags, to differentiate walls, maybe for different levels, which will be shown in an example.
 }
 
 // #endregion
@@ -138,6 +160,20 @@ func SetPixel(x, y int, p Pixel) {
 	if ty >= 0 && ty < termH && tx >= 0 && tx < termW {
 		backBuffer[ty][tx] = p
 	}
+}
+
+// #endregion
+
+// #region fake 3D logic
+
+func NewFake3dWall(x1, x2, y1, y2 float64, colour, fallbackSymbol string, angleDither bool, optionalTags ...string) *Fake3dWall {
+	tags := []string{}
+	if len(optionalTags) > 0 {
+		for i := range len(optionalTags) {
+			tags = append(tags, optionalTags[i])
+		}
+	}
+	return &Fake3dWall{x1, x2, y1, y2, colour, fallbackSymbol, angleDither, []string{}}
 }
 
 // #endregion
@@ -182,6 +218,9 @@ func GetDeltaTime() float64 {
 func (s *Sprite) Move(dx, dy float64, moveChildren bool) {
 	s.mu.Lock()
 
+	s.PrevX = s.X
+	s.PrevY = s.Y
+
 	s.X += dx
 	s.Y += dy
 
@@ -199,6 +238,9 @@ func (s *Sprite) Move(dx, dy float64, moveChildren bool) {
 // calculate the relative x and y to a target position as you would when using Move(). Does the same to children if moveChildren is true.
 func (s *Sprite) MoveDirect(x, y float64, moveChildren bool) {
 	s.mu.Lock()
+
+	s.PrevX = s.X
+	s.PrevY = s.Y
 
 	s.X = x
 	s.Y = y
@@ -253,13 +295,7 @@ func (s *Sprite) AddSpriteBack() {
 	// If it has a parent, add it back to the parent's children list if not already there
 	if s.Parent != nil {
 		s.Parent.mu.Lock()
-		found = false
-		for _, child := range s.Parent.Children {
-			if child == s {
-				found = true
-				break
-			}
-		}
+		found = slices.Contains(s.Parent.Children, s)
 		if !found {
 			s.Parent.Children = append(s.Parent.Children, s)
 		}
@@ -319,7 +355,7 @@ func DrawSpritesWithTag(tag string) {
 
 // #endregion
 
-// #region Standalone Graphics
+// #region Graphics
 
 func DrawLine(x1, y1, x2, y2 int, char, fg, bg string) {
 	dx := int(math.Abs(float64(x2 - x1)))
@@ -353,11 +389,57 @@ func DrawLine(x1, y1, x2, y2 int, char, fg, bg string) {
 
 func DrawRect(x, y, w, h int, char, fg, bg string) {
 	p := Pixel{char, fg, bg}
-	for i := 0; i < h; i++ {
-		for j := 0; j < w; j++ {
+	for i := range h {
+		for j := range w {
 			SetPixel(x+j, y+i, p)
 		}
 	}
+}
+
+// Project3D converts 3D coordinates (x, y, z) into 2D terminal coordinates (column, row).
+// posX, posY and posZ is the position of the camera. Proj takes the orthogonal, perspective or isometric projection.
+func Project3D(x, y, z float64, proj projection, posX, posY, posZ float64, fov float64) (int, int) {
+	var screenX, screenY float64
+
+	// Translate coordinates relative to the "camera" position
+	relX := x - posX
+	relY := y - posY
+	relZ := z - posZ
+
+	switch proj {
+	case orthogonal:
+		// Simple parallel projection, Z is ignored for position
+		screenX = relX
+		screenY = relY
+
+	case perspective:
+		// Standard perspective: divide by Z (depth)
+		// We add a small epsilon to avoid division by zero
+		if relZ <= 0 {
+			relZ = 0.1
+		}
+		// 20.0 is a "Field of View" constant; adjust to taste
+		fieldOfView := fov
+		screenX = (relX * fieldOfView) / relZ
+		screenY = (relY * fieldOfView) / relZ
+
+	case isometric:
+		// Classic 30-degree isometric projection
+		// x' = (x - z) * cos(30)
+		// y' = (x + z) * sin(30) - y
+		screenX = (relX - relZ) * 0.866
+		screenY = (relX+relZ)*0.5 - relY
+	}
+
+	// 1. Apply GlobalCircleRatio to compensate for tall terminal characters
+	// 2. Offset by half terminal size to center the coordinate (0,0,0) in the middle of the screen
+	// 3. Final +1 to align with the framework's 1-based terminal coordinate system
+	halfW, halfH := float64(termW)/2.0, float64(termH)/2.0
+
+	finalX := (screenX * GlobalFixRatio) + halfW + 1
+	finalY := screenY + halfH + 1
+
+	return int(math.Round(finalX)), int(math.Round(finalY))
 }
 
 // DrawCircle draws the outline of a circle.
@@ -371,7 +453,7 @@ func DrawCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
 	// Ratio multiplier (2.0 is standard for most terminals)
 	ratio := 1.0
 	if fixRatio {
-		ratio = GlobalCircleRatio
+		ratio = GlobalFixRatio
 	}
 
 	drawPoints := func(xc, yc, x, y int, p Pixel) {
@@ -402,7 +484,18 @@ func DrawCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
 
 // DrawTriangle draws a triangle. The resulting triangle is guaranteed to have three sides.
 // These sides are guaranteed to be straight lines. The shape is guaranteed to have three corners and it is also guaranteed that the angles on the inside of the
-// triangle all add up to exactly 180 degrees. This triangle is also GUARANTEED to have at least zero sides, and less than 50 sides. It is also guaranteed
+// triangle all add up to exactly 180 degrees. This triangle is also GUARANTEED to have at least zero sides, and less than 50 sides. It is also guaranteed that the
+// triangle will be a triangle, as long as it is a triangle, although you'd have to find a way to objectively define triangle and all of its components, including
+// shape, three, side, line, and lots of abstract concepts which will be hard to define objectively. Anyways this triangle is guaranteed to work, if it doesn't
+// not work, or if it doesn't go not correct. However to guarantee any of these guarantees you'd need to define guarantee, and i could guarantee you couldn't
+// not do that if you guaranteed you wouldn't not do it not incorrectly, and that guarantee wasn't not not incorrect, but to guarantee that you'd need to define
+// incorrect. That was a lot of guarantees, and if you're still here, the secret code is eleven, three, four and five, and I had to use words for that, otherwise
+// people skipping over this whole thing would see the secret code in numbers, which are highly distinct from letters. I can guarantee if you're still reading
+// this, you know that you won't get any more information on DrawTriangle except that it draws triangles, which you knew from the function name anyway.
+// But that doesn't mean stop reading! If you thought this project was serious enough to have real documentation for a function called DrawTriangle, you'd be
+// mistaken. I'm the only one working on the code for now, so I won't be stopped by collaborators. Anyways let me tell you what it's like outside right now:
+// It was just rainy but wait, I can't disclose this information or you might piece together where I live. so yeah. If you read this far, the statement I am about
+// to make is a lie: the secret code is actually not 11345, it's 16320. Thanks for reading.
 func DrawTriangle(x1, y1, x2, y2, x3, y3 int, char, fg, bg string) {
 	DrawLine(x1, y1, x2, y2, char, fg, bg)
 	DrawLine(x2, y2, x3, y3, char, fg, bg)
@@ -491,7 +584,7 @@ func DrawFilledCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
 
 	ratio := 1.0
 	if fixRatio {
-		ratio = GlobalCircleRatio
+		ratio = GlobalFixRatio
 	}
 
 	fillLine := func(xCenter, xOffset, y int) {
@@ -515,6 +608,29 @@ func DrawFilledCircle(xc, yc, r int, char, fg, bg string, fixRatio bool) {
 			d = d + 4*(x-y) + 10
 		} else {
 			d = d + 4*x + 6
+		}
+	}
+}
+
+// DrawText draws text to the screen at the specified position.
+// Each character in the text string is rendered as a separate pixel.
+// Supports newlines (\n) for multi-line text and tabs (\t) for indentation.
+func DrawText(x, y int, text, fg, bg string) {
+	currentX, currentY := x, y
+	for _, char := range text {
+		switch char {
+		case '\n':
+			// Move to next line
+			currentY++
+			currentX = x // Reset to original X position
+		case '\t':
+			// Add tab spacing (4 spaces)
+			currentX += 4
+		default:
+			// Draw regular character
+			p := Pixel{string(char), fg, bg}
+			SetPixel(currentX, currentY, p)
+			currentX++
 		}
 	}
 }

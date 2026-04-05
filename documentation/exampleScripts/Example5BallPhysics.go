@@ -1,13 +1,10 @@
-package main
+package exampleScripts
 
 import (
-	//"fmt"
 	"math"
 	"time"
 
 	"github.com/JackDL2058/troglodyte"
-	//e "github.com/JackDL2058/troglodyte/documentation/exampleScripts"
-	//s "github.com/JackDL2058/troglodyte/troglosprite"
 )
 
 func main() {
